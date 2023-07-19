@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "poc-redis-fastapi-chemblntd"
+version = "0.1.0"
+description = ""
+authors = ["KB <kmbhm1@gmail.com>"]
+readme = "README.md"
+packages = [{include = "poc_redis_fastapi_chemblntd"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+aioredis = "2.0.0"
+fastapi = "^0.100.0"
+uvicorn = {extras = ["standard"], version = "^0.23.1"}
+pandas = "^2.0.3"
+redis = "^4.6.0"
+redis-om = "^0.2.1"
+gunicorn = "^21.2.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

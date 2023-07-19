@@ -1,0 +1,25 @@
+version: "3.8"
+services:
+  redis:
+    image: redis/redis-stack:latest
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data:/data
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+  api:
+    build: .
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_OM_URL=redis://@redis:6379
+    image: swamidass/fastapi-poc:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app:ro
+    depends_on:
+      - redis
