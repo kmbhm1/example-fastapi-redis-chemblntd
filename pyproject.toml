@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "poc-redis-fastapi-chemblntd"
-version = "0.1.0"
+version = "0.1.1"
 description = ""
 authors = ["KB <kmbhm1@gmail.com>"]
 readme = "README.md"

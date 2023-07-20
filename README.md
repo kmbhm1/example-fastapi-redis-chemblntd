@@ -22,7 +22,7 @@ This project has the following goals:
   - [Development](#development)
     - [Run Locally](#run-locally)
     - [Run the Docker Container Locally](#run-the-docker-container-locally)
-    - [Retrieve the Swagger Documentation](#retrieve-the-swagger-documentation)
+    - [Retrieve the Open API Documentation](#retrieve-the-open-api-documentation)
   - [Example Use](#example-use)
   - [Future Work](#future-work)
 
@@ -66,6 +66,7 @@ Fast Api is a modern, fast (high-performance), web framework for building APIs w
 
 ```shell
 cd <project>                                            # Change to the project directory
+poetry shell                                            # Activate the virtual environment
 uvicorn poc_redis_fastapi_chemblntd.main:app --reload   # Run the FastAPI server
 ```
 
@@ -93,9 +94,9 @@ docker-compose up                       # Run the docker container locally
 1. Perform the installation [steps](#installation).
 2. [Run](#docker--docker-compose) the docker container locally.
 
-### Retrieve the Swagger Documentation
+### Retrieve the Open API Documentation
 
-Navigate to [http://localhost:8000/docs](http://localhost:8000/docs) to view the Swagger documentation while the FastAPI server is running.
+Navigate to [http://localhost:8000/redoc](http://localhost:8000/redoc) to view the Open API documentation while the FastAPI server is running.
 
 ## Example Use
 
@@ -114,9 +115,9 @@ curl -X GET "http://localhost:8000/chemblntd/search/smiles/NC(=O)" -H  "accept: 
 ## Future Work
 
 - [ ] Integrate more [caching](https://developer.redis.com/develop/python/fastapi/#caching-data-with-redis) with Redis & add the ability to add data.
-- [ ] Modify the refrest process to be more dynamic.
+- [ ] Modify the refresh process to be more dynamic.
 - [ ] Create tests and test coverage.
-- [ ] Update the dosstrings and OpenApi documentation.
+- [X] Update the dosstrings and OpenApi documentation.
 - [ ] Add pre-commit [hooks](https://pre-commit.com/).
 - [ ] Integrate different data sources & models.
 - [ ] Modify the indexing model and REST methods for more robust searching.
