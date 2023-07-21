@@ -1,5 +1,6 @@
 from typing import List
 from pydantic import BaseModel
+from fastapi import Body
 
 from poc_redis_fastapi_chemblntd.chemblntd import Chembtlntd
 
@@ -44,13 +45,16 @@ responses = {
 
 
 class SmilesBody(BaseModel):
-    smiles: str
+    smiles: str = Body(
+        title="The SMILES string",
+        description="The [SMILES](https://en.wikipedia.org/wiki/Simplified_molecular-input_line-entry_system) string to search for",
+    )
 
     model_config = {
         "json_schema_extra": {
             "examples": [
                 {
-                    "smiles": "CN(C)c1ccc2[n+]",
+                    "smiles": "CCC1C(=O)NC(=O)NC1=O",
                 }
             ]
         }

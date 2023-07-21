@@ -74,7 +74,7 @@ class Chembtlntd(BaseModel):
                     "numrow": "1",
                     "sid": "123456789",
                     "cid": "123456789.0",
-                    "bioassay_source": "Harvard",
+                    "bioassay_source": "foo",
                     "rankscore": 33,
                     "outcome": "Inactive",
                     "depositdate": "2019/12/31",

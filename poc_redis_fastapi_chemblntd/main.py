@@ -1,8 +1,9 @@
-import json
+import types
+from typing import Literal, Type
 from fastapi import FastAPI
 from fastapi.params import Path
 from fastapi.responses import JSONResponse
-from pydantic import Field
+from pydantic import BaseModel
 import redis
 import pandas as pd
 import tempfile
@@ -10,9 +11,10 @@ import logging
 import os
 import urllib.request
 import uuid
-from redis_om import NotFoundError, Migrator
+from redis_om import NotFoundError, Migrator, HashModel
 
 from poc_redis_fastapi_chemblntd.chemblntd import ChembtlntdRedis
+from poc_redis_fastapi_chemblntd.helpers import class_with_types
 from poc_redis_fastapi_chemblntd.openapi import (
     Hashes,
     Items,
@@ -40,10 +42,18 @@ r = redis.Redis(host=REDIS_HOST, port=6379, decode_responses=True)
 # Constants
 CSV_URL = "ftp://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLNTD/set7_harvard_liver/Harvard_ALL.csv"
 TEMP_DIR = tempfile.gettempdir()
-TEMP_FILE_LOC = f"{TEMP_DIR}/{str(uuid.uuid4())}.csv"
 
 
-def remove_file(path: str):
+def remove_file(path: str) -> None:
+    """Delete a file if it exists.
+
+    Args:
+        path (str): The path to the file to delete.
+
+    Examples:
+        >>> remove_file("foo.txt")
+    """
+
     try:
         os.remove(path)
     except OSError:
@@ -52,6 +62,17 @@ def remove_file(path: str):
 
 
 def ping_redis() -> bool:
+    """Ping the Redis database to check that it is up.
+
+    Uses the `ping` method of the `redis` package to check that the Redis database is up.
+
+    Returns:
+        bool: True if the Redis database is up, False otherwise.
+
+    Examples:
+        >>> ping_redis()
+        True
+    """
     try:
         logger.info("Pinging redis db.")
         r.ping()
@@ -64,6 +85,15 @@ def ping_redis() -> bool:
 
 
 def flush_redis() -> bool:
+    """Flush the Redis database.
+
+    Returns:
+        bool: True if the Redis database is flushed, False is there is an Exception thrown.
+
+    Examples:
+        >>> flush_redis()
+        True
+    """
     try:
         logger.info("Flushing redis db.")
         r.flushdb()
@@ -74,12 +104,107 @@ def flush_redis() -> bool:
         return False
 
 
+def temp_location() -> str:
+    return f"{TEMP_DIR}/{str(uuid.uuid4())}.csv"
+
+
+class RefreshBody(BaseModel):
+    url: str
+    custom_schema: dict[str, Literal["int", "float", "str", "bool"]]
+
+
+@app.post("/")
+async def dynamic_refresh(directions: RefreshBody):
+    """
+    Refreshes the Redis database with the latest ChEMBL-NTD data.
+    """
+    # ping redis db
+    if not ping_redis():
+        return JSONResponse(
+            status_code=500, content={"message": "Internal server error"}
+        )
+
+    if not directions.url.endswith(".csv"):
+        return JSONResponse(
+            status_code=404, content={"message": "Only csv files are supported"}
+        )
+
+    # download csv file to init db
+    try:
+        logger.info("Downloading data.")
+        # TODO: get temp file loc dynamically
+        temp_file_loc = temp_location()
+        info = urllib.request.urlretrieve(directions.url, temp_file_loc)
+        assert info[0] == temp_file_loc
+        assert os.path.exists(info[0])
+    except AssertionError as e:
+        logger.error(f"Temp file {temp_file_loc} does not exist or is not correct.")
+        logger.error(e)
+        remove_file(info[0])
+        remove_file(temp_file_loc)
+        return JSONResponse(
+            status_code=500, content={"message": "Internal server error"}
+        )
+    except Exception as e:
+        logger.error(f"Error downloading file {directions.url}.")
+        logger.error(e)
+        remove_file(temp_file_loc)
+        return JSONResponse(
+            status_code=500, content={"message": "Internal server error"}
+        )
+
+    # load data into pandas df & clean
+    # TODO: add this to a fn
+    logger.info("Loading data into pandas df.")
+    df = pd.read_csv(info[0], header=0, sep=",", index_col=False)
+    df.columns = (
+        df.columns.str.strip()
+        .str.lower()
+        .str.replace(" ", "_")
+        .str.replace("(", "")
+        .str.replace(")", "")
+        .str.replace("%", "pct")
+    )
+    logger.info(f"Dataframe columns: {df.columns}.")
+    logger.info(f"Dataframe shape: {df.shape}.")
+
+    # get new class based on attributes
+    type_annotations = {
+        "int": int,
+        "float": float,
+        "str": str,
+        "bool": bool,
+    }
+    try:
+        NewClass = types.new_class(
+            "CsvHashModel",
+            (HashModel,),
+            {k: type_annotations[v] for k, v in directions.custom_schema.items()},
+        )
+        # NewClass = class_with_types(
+        #     "CsvHashModel", [Type[HashModel]], directions.custom_schema
+        # )
+    except Exception as e:
+        logger.error(e)
+        del df
+        return JSONResponse(
+            status_code=500, content={"message": "Internal server error"}
+        )
+
+    for line_num, (i, row) in enumerate(df.iterrows()):
+        x = NewClass(**row.to_dict())
+        logger.info(dir(x))
+
+
 @app.get(
     "/chemblntd/hash",
     response_model=Hashes,
     responses={500: {"message": "Internal server error"}},
 )
 async def get_hashes():
+    """
+    Returns a list of all valid hash ids in the Redis database.
+    """
     try:
         keys = r.keys()
         hashes = []
@@ -99,7 +224,16 @@ async def get_hashes():
 
 
 @app.get("/chemblntd/hash/{hash}", response_model=Item, responses={**responses})
-async def get_chemblntd(hash: str = Path(example="01H5T42K2AEA7682MR9XD7Y2S4")):
+async def get_chemblntd(
+    hash: str = Path(
+        title="The hash key in Redis",
+        description="The identifier for which to identify an entry in the associated Redis Db.",
+        example="01H5T42K2AEA7682MR9XD7Y2S4",
+    )
+):
+    """
+    Returns the ChEMBL-NTD entry for the given hash id in the Redis database.
+    """
     try:
         result = ChembtlntdRedis.get(hash)
         msg = {"id": hash, "value": result.dict()}
@@ -115,7 +249,16 @@ async def get_chemblntd(hash: str = Path(example="01H5T42K2AEA7682MR9XD7Y2S4")):
 
 
 @app.get("/chemblntd/search/cid/{cid}", response_model=Items, responses={**responses})
-async def search_by_cid(cid: str = Path(example="54735847.0")):
+async def search_by_cid(
+    cid: str = Path(
+        title="PubChem CID",
+        description="The identifier of the molecule in PubChem",
+        example="54735847.0",
+    )
+):
+    """
+    Returns a list of ChEMBL-NTD entries for the given CID (Compound) in the Redis database.
+    """
     try:
         results = ChembtlntdRedis.find(ChembtlntdRedis.cid == cid).all()
         msg = {"id": cid, "value": results.dict()}
@@ -131,7 +274,16 @@ async def search_by_cid(cid: str = Path(example="54735847.0")):
 
 
 @app.get("/chemblntd/search/sid/{sid}", response_model=Items, responses={**responses})
-async def search_by_sid(sid: str = Path(example="121363756")):
+async def search_by_sid(
+    sid: str = Path(
+        title="PubChem SID",
+        description="The identifier of the substance in PubChem",
+        example="121363756",
+    )
+):
+    """
+    Returns a list of ChEMBL-NTD entries for the given SID (Substance) in the Redis database.
+    """
     try:
         results = ChembtlntdRedis.find(ChembtlntdRedis.sid == sid).all()
         msg = {"id": sid, "value": results.dict()}
@@ -149,6 +301,9 @@ async def search_by_sid(sid: str = Path(example="121363756")):
 # TODO: fix json decode errors for examples like "("
 @app.post("/chemblntd/search/smiles/", response_model=Items, responses={**responses})
 async def search_by_smiles(smiles: SmilesBody):
+    """
+    Returns a list of ChEMBL-NTD entries that containe the given SMILES string in the Redis database.
+    """
     try:
         results = ChembtlntdRedis.find(ChembtlntdRedis.sid_smiles % smiles.smiles).all()
         msg = {"id": smiles.smiles, "value": [r.dict() for r in results]}
@@ -172,6 +327,9 @@ async def search_by_smiles(smiles: SmilesBody):
     },
 )
 async def refresh():
+    """
+    Refreshes the Redis database with the latest ChEMBL-NTD data.
+    """
     # ping redis db
     if not ping_redis():
         return JSONResponse(
@@ -181,21 +339,22 @@ async def refresh():
     # download csv file to init db
     try:
         logger.info("Downloading data.")
-        info = urllib.request.urlretrieve(CSV_URL, TEMP_FILE_LOC)
-        assert info[0] == TEMP_FILE_LOC
+        temp_file_loc = temp_location()
+        info = urllib.request.urlretrieve(CSV_URL, temp_file_loc)
+        assert info[0] == temp_file_loc
         assert os.path.exists(info[0])
     except AssertionError as e:
-        logger.error(f"Temp file {TEMP_FILE_LOC} does not exist or is not correct.")
+        logger.error(f"Temp file {temp_file_loc} does not exist or is not correct.")
         logger.error(e)
         remove_file(info[0])
-        remove_file(TEMP_FILE_LOC)
+        remove_file(temp_file_loc)
         return JSONResponse(
             status_code=500, content={"message": "Internal server error"}
         )
     except Exception as e:
         logger.error(f"Error downloading file {CSV_URL}.")
         logger.error(e)
-        remove_file(TEMP_FILE_LOC)
+        remove_file(temp_file_loc)
         return JSONResponse(
             status_code=500, content={"message": "Internal server error"}
         )
@@ -216,7 +375,7 @@ async def refresh():
 
     # flush redis db
     if not flush_redis():
-        remove_file(TEMP_FILE_LOC)
+        remove_file(temp_file_loc)
         del df
         return JSONResponse(
             status_code=500, content={"message": "Internal server error"}
@@ -240,14 +399,14 @@ async def refresh():
     except Exception as e:
         logger.error("Error creating indices.")
         logger.error(e)
-        remove_file(TEMP_FILE_LOC)
+        remove_file(temp_file_loc)
         del df
         return JSONResponse(
             status_code=500, content={"message": "Internal server error"}
         )
 
     logger.info("Refresh complete.")
-    remove_file(TEMP_FILE_LOC)
+    remove_file(temp_file_loc)
     del df
 
     return JSONResponse(
