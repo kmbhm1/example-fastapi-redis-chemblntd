@@ -1,5 +1,5 @@
 import types
-from typing import Literal, Type
+from typing import Literal, Optional, Type
 from fastapi import FastAPI
 from fastapi.params import Path
 from fastapi.responses import JSONResponse
@@ -110,7 +110,7 @@ def temp_location() -> str:
 
 class RefreshBody(BaseModel):
     url: str
-    custom_schema: dict[str, Literal["int", "float", "str", "bool"]]
+    custom_schema: Optional[dict[str, Literal["int", "float", "str", "bool"]]]
 
 
 @app.post("/")
@@ -175,15 +175,28 @@ async def dynamic_refresh(directions: RefreshBody):
         "str": str,
         "bool": bool,
     }
+    models = {
+        "hash": {"name": "CsvHashModel", "model": HashModel, "instance": None},
+        "base": {"name": "CsvBaseModel", "model": BaseModel, "instance": None},
+    }
+
     try:
-        NewClass = types.new_class(
-            "CsvHashModel",
-            (HashModel,),
-            {k: type_annotations[v] for k, v in directions.custom_schema.items()},
-        )
-        # NewClass = class_with_types(
-        #     "CsvHashModel", [Type[HashModel]], directions.custom_schema
+        for k, d in models.items():
+            models[k]["instance"] = types.new_class(
+                d["name"],
+                (d["model"],),
+                {},
+            )
+            for col, t in directions.custom_schema.items():
+                models[k]["instance"].__annotations__[col] = type_annotations[t]
+
+        # CsvHashModel = types.new_class(
+        #     "CsvHashModel",
+        #     (HashModel,),
+        #     {},
         # )
+        # for k, v in directions.custom_schema.items():
+        #     CsvBaseModel.__annotations__[k] = type_annotations[v]
     except Exception as e:
         logger.error(e)
         del df
@@ -192,8 +205,71 @@ async def dynamic_refresh(directions: RefreshBody):
         )
 
     for line_num, (i, row) in enumerate(df.iterrows()):
-        x = NewClass(**row.to_dict())
-        logger.info(dir(x))
+        # x = CsvHashModel(**row.to_dict())  # Upload to Reddis
+        x = models["hash"]["instance"](**row.to_dict())  # Upload to Redis
+        get_columns.
+        logger.info(msg=x.dict())
+        break
+
+    del df
+    remove_file(temp_file_loc)
+
+
+class GetColumnsBody(BaseModel):
+    url: str
+
+
+@app.post("/columns")
+async def get_columns(body: GetColumnsBody):
+    if not body.url.endswith(".csv"):
+        return JSONResponse(
+            status_code=404, content={"message": "Only csv files are supported"}
+        )
+
+    # download csv file to init db
+    try:
+        logger.info("Downloading data.")
+        # TODO: get temp file loc dynamically
+        temp_file_loc = temp_location()
+        info = urllib.request.urlretrieve(body.url, temp_file_loc)
+        assert info[0] == temp_file_loc
+        assert os.path.exists(info[0])
+    except AssertionError as e:
+        logger.error(f"Temp file {temp_file_loc} does not exist or is not correct.")
+        logger.error(e)
+        remove_file(info[0])
+        remove_file(temp_file_loc)
+        return JSONResponse(
+            status_code=500, content={"message": "Internal server error"}
+        )
+    except Exception as e:
+        logger.error(f"Error downloading file {body.url}.")
+        logger.error(e)
+        remove_file(temp_file_loc)
+        return JSONResponse(
+            status_code=500, content={"message": "Internal server error"}
+        )
+
+    # load data into pandas df & clean
+    # TODO: add this to a fn
+    logger.info("Loading data into pandas df.")
+    df = pd.read_csv(info[0], header=0, sep=",", index_col=False)
+    df.columns = (
+        df.columns.str.strip()
+        .str.lower()
+        .str.replace(" ", "_")
+        .str.replace("(", "")
+        .str.replace(")", "")
+        .str.replace("%", "pct")
+    )
+    logger.info(f"Dataframe columns: {df.columns}.")
+    logger.info(f"Dataframe shape: {df.shape}.")
+
+    msg = {"columns": df.columns.to_list()}
+    del df
+    remove_file(temp_file_loc)
+
+    return JSONResponse(status_code=200, content=msg)
 
 
 @app.get(
