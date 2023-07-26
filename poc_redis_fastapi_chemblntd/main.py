@@ -1,3 +1,5 @@
+import sys
+import traceback
 import types
 from typing import Literal, Optional, Type
 from fastapi import FastAPI
@@ -11,10 +13,10 @@ import logging
 import os
 import urllib.request
 import uuid
-from redis_om import NotFoundError, Migrator, HashModel
+from redis_om import NotFoundError, Migrator, HashModel, Field
 
 from poc_redis_fastapi_chemblntd.chemblntd import ChembtlntdRedis
-from poc_redis_fastapi_chemblntd.helpers import class_with_types
+from poc_redis_fastapi_chemblntd.helpers import class_with_types, random_value
 from poc_redis_fastapi_chemblntd.openapi import (
     Hashes,
     Items,
@@ -26,7 +28,7 @@ from poc_redis_fastapi_chemblntd.openapi import (
 
 # logger setup
 logging.basicConfig(
-    level=logging.INFO, format="%(levelname)s:\t  %(name)s - %(message)s"
+    level=logging.INFO, format="%(levelname)s:\t  %(name)s [%(lineno)s] - %(message)s"
 )
 
 # get root logger
@@ -42,6 +44,12 @@ r = redis.Redis(host=REDIS_HOST, port=6379, decode_responses=True)
 # Constants
 CSV_URL = "ftp://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLNTD/set7_harvard_liver/Harvard_ALL.csv"
 TEMP_DIR = tempfile.gettempdir()
+TYPE_ANNOTATIONS = {
+    "int": int,
+    "float": float,
+    "str": str,
+    "bool": bool,
+}
 
 
 def remove_file(path: str) -> None:
@@ -108,9 +116,142 @@ def temp_location() -> str:
     return f"{TEMP_DIR}/{str(uuid.uuid4())}.csv"
 
 
+def is_float(s: str) -> bool:
+    """Check if a string is a float.
+
+    Args:
+        s (str): The string to check.
+
+    Returns:
+        bool: True if the string is a float, False otherwise.
+
+    Examples:
+        >>> is_float("1.0")
+        True
+        >>> is_float("1")
+        False
+    """
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+
+
+def is_int(s: str) -> bool:
+    """Check if a string is an integer.
+
+    Args:
+        s (str): The string to check.
+
+    Returns:
+        bool: True if the string is an integer, False otherwise.
+
+    Examples:
+        >>> is_int("1")
+        True
+        >>> is_int("1.0")
+        False
+    """
+    try:
+        return float(s).is_integer()
+    except ValueError:
+        return False
+
+
+def is_bool(s: str) -> bool:
+    """Check if a string is a boolean.
+
+    Args:
+        s (str): The string to check.
+
+    Returns:
+        bool: True if the string is a boolean, False otherwise.
+
+    Examples:
+        >>> is_bool("True")
+        True
+        >>> is_bool("1")
+        False
+    """
+    if s.lower() in ["true", "false"]:
+        return True
+    else:
+        return False
+
+
+def geuss_schema(df: pd.DataFrame, sample_size: int = 25) -> dict[str, Type]:
+    """Geuss the schema of a pandas DataFrame.
+
+    Args:
+        df (pd.DataFrame): The pandas DataFrame to geuss the schema of.
+
+    Returns:
+        dict[str, Type]: A dictionary of the column names and their associated types.
+
+    Examples:
+        >>> df = pd.DataFrame({"a": [1, 2, 3], "b": [1.0, 2.0, 3.0]})
+        >>> geuss_schema(df)
+        {"a": int, "b": float}
+    """
+    schema = {}
+    first_rows = df.head(sample_size)
+
+    for col in first_rows.columns:
+        c = first_rows[col].to_list()
+
+        if first_rows[col].dtype == "int64" or all(is_int(e) for e in c):
+            schema[col] = int
+        elif first_rows[col].dtype == "float64" or all(is_float(e) for e in c):
+            schema[col] = float
+        elif first_rows[col].dtype == "object":
+            schema[col] = str
+        elif first_rows[col].dtype == "bool" or all(is_bool(e) for e in c):
+            schema[col] = bool
+        else:
+            schema[col] = str
+
+    return schema
+
+
+def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean the column names of a pandas DataFrame.
+
+    Args:
+        df (pd.DataFrame): The pandas DataFrame to clean the column names of.
+
+    Returns:
+        pd.DataFrame: The pandas DataFrame with the cleaned column names.
+
+    Examples:
+        >>> df = pd.DataFrame({"A": [1, 2, 3], "B": [1.0, 2.0, 3.0]})
+        >>> clean_column_names(df)
+           a    b
+        0  1  1.0
+        1  2  2.0
+        2  3  3.0
+    """
+    df.columns = (
+        df.columns.str.strip()
+        .str.lower()
+        .str.replace(" ", "_")
+        .str.replace("(", "")
+        .str.replace(")", "")
+        .str.replace("%", "pct")
+    )
+
+    return df
+
+
+class RefreshHashModelInfo(BaseModel):
+    type: Literal["int", "float", "str", "bool"]
+    index: bool = False
+    full_text_search: bool = False
+
+
 class RefreshBody(BaseModel):
     url: str
-    custom_schema: Optional[dict[str, Literal["int", "float", "str", "bool"]]]
+    custom_schema: Optional[dict[str, RefreshHashModelInfo]]  # key = column name
 
 
 @app.post("/")
@@ -154,27 +295,13 @@ async def dynamic_refresh(directions: RefreshBody):
         )
 
     # load data into pandas df & clean
-    # TODO: add this to a fn
     logger.info("Loading data into pandas df.")
     df = pd.read_csv(info[0], header=0, sep=",", index_col=False)
-    df.columns = (
-        df.columns.str.strip()
-        .str.lower()
-        .str.replace(" ", "_")
-        .str.replace("(", "")
-        .str.replace(")", "")
-        .str.replace("%", "pct")
-    )
+    df = clean_column_names(df)
     logger.info(f"Dataframe columns: {df.columns}.")
     logger.info(f"Dataframe shape: {df.shape}.")
 
     # get new class based on attributes
-    type_annotations = {
-        "int": int,
-        "float": float,
-        "str": str,
-        "bool": bool,
-    }
     models = {
         "hash": {"name": "CsvHashModel", "model": HashModel, "instance": None},
         "base": {"name": "CsvBaseModel", "model": BaseModel, "instance": None},
@@ -182,34 +309,64 @@ async def dynamic_refresh(directions: RefreshBody):
 
     try:
         for k, d in models.items():
+            # ref: https://stackoverflow.com/questions/59412427/set-module-on-class-created-with-types-new-class
+            # ref: https://python-course.eu/oop/dynamically-creating-classes-with-type.php
+
+            # add dynamic class attribute annotations
+            class_body = {
+                "__annotations__": {
+                    col: TYPE_ANNOTATIONS[t.type]
+                    for col, t in directions.custom_schema.items()
+                },
+            }
+
+            # init with field values if hash
+            if k == "hash":
+                for col, t in directions.custom_schema.items():
+                    if t.index:
+                        class_body[col] = Field(
+                            index=t.index, full_text_search=t.full_text_search
+                        )
+            elif k == "base":
+                class_body["model_config"] = {
+                    "json_schema_extra": {
+                        "examples": [
+                            {
+                                col: random_value(8, t.type)
+                                for col, t in directions.custom_schema.items()
+                            }
+                        ]
+                    }
+                }
+
             models[k]["instance"] = types.new_class(
                 d["name"],
                 (d["model"],),
                 {},
+                lambda ns: ns.update(class_body),
             )
-            for col, t in directions.custom_schema.items():
-                models[k]["instance"].__annotations__[col] = type_annotations[t]
+    except Exception:
+        logger.error(traceback.format_exc())
+        del df
+        remove_file(temp_file_loc)
+        return JSONResponse(
+            status_code=500, content={"message": "Internal server error"}
+        )
 
-        # CsvHashModel = types.new_class(
-        #     "CsvHashModel",
-        #     (HashModel,),
-        #     {},
-        # )
-        # for k, v in directions.custom_schema.items():
-        #     CsvBaseModel.__annotations__[k] = type_annotations[v]
-    except Exception as e:
-        logger.error(e)
+    # flush redis db
+    if not flush_redis():
+        remove_file(temp_file_loc)
         del df
         return JSONResponse(
             status_code=500, content={"message": "Internal server error"}
         )
 
+    # load data into redis db
     for line_num, (i, row) in enumerate(df.iterrows()):
-        # x = CsvHashModel(**row.to_dict())  # Upload to Reddis
         x = models["hash"]["instance"](**row.to_dict())  # Upload to Redis
-        get_columns.
-        logger.info(msg=x.dict())
-        break
+        x.save()
+        # logger.info(msg=x.dict())
+        # break
 
     del df
     remove_file(temp_file_loc)
@@ -220,7 +377,7 @@ class GetColumnsBody(BaseModel):
 
 
 @app.post("/columns")
-async def get_columns(body: GetColumnsBody):
+async def geuss_columns(body: GetColumnsBody):
     if not body.url.endswith(".csv"):
         return JSONResponse(
             status_code=404, content={"message": "Only csv files are supported"}
@@ -251,7 +408,6 @@ async def get_columns(body: GetColumnsBody):
         )
 
     # load data into pandas df & clean
-    # TODO: add this to a fn
     logger.info("Loading data into pandas df.")
     df = pd.read_csv(info[0], header=0, sep=",", index_col=False)
     df.columns = (
@@ -262,10 +418,12 @@ async def get_columns(body: GetColumnsBody):
         .str.replace(")", "")
         .str.replace("%", "pct")
     )
-    logger.info(f"Dataframe columns: {df.columns}.")
-    logger.info(f"Dataframe shape: {df.shape}.")
 
-    msg = {"columns": df.columns.to_list()}
+    s = geuss_schema(df)
+    for k, v in s.items():
+        s[k] = v.__name__
+
+    msg = {"guessed_schema": s}
     del df
     remove_file(temp_file_loc)
 
