@@ -2,6 +2,7 @@ import sys
 import traceback
 import types
 from typing import Literal, Optional, Type
+import chardet
 from fastapi import FastAPI
 from fastapi.params import Path
 from fastapi.responses import JSONResponse
@@ -18,9 +19,11 @@ from redis_om import NotFoundError, Migrator, HashModel, Field
 from poc_redis_fastapi_chemblntd.chemblntd import ChembtlntdRedis
 from poc_redis_fastapi_chemblntd.helpers import class_with_types, random_value
 from poc_redis_fastapi_chemblntd.openapi import (
+    GetColumnsBody,
     Hashes,
     Items,
     Message,
+    RefreshBody,
     SmilesBody,
     responses,
     Item,
@@ -49,6 +52,10 @@ TYPE_ANNOTATIONS = {
     "float": float,
     "str": str,
     "bool": bool,
+}
+CUSTOM_CLASSES = {
+    "hash": {"name": "CsvHashModel", "model": HashModel, "instance": None},
+    "base": {"name": "CsvBaseModel", "model": BaseModel, "instance": None},
 }
 
 
@@ -180,6 +187,35 @@ def is_bool(s: str) -> bool:
         return False
 
 
+def get_encoding(file: str) -> str:
+    """Get the encoding of a file.
+
+    Args:
+        file (str): The path to the file to get the encoding of.
+
+    Returns:
+        str: The encoding of the file.
+
+    Examples:
+        >>> get_encoding("foo.txt")
+        "utf-8"
+    """
+    try:
+        with open(file, "rb") as f:
+            rawdata = f.read(10000)
+    except Exception as e:
+        logger.error(f"Error reading file {file}.")
+        logger.error(e)
+        return "utf-8"
+
+    try:
+        return chardet.detect(rawdata)["encoding"]
+    except Exception as e:
+        logger.error(f"Error detecting encoding of file {file}.")
+        logger.error(e)
+        return "utf-8"
+
+
 def geuss_schema(df: pd.DataFrame, sample_size: int = 25) -> dict[str, Type]:
     """Geuss the schema of a pandas DataFrame.
 
@@ -243,137 +279,12 @@ def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-class RefreshHashModelInfo(BaseModel):
-    type: Literal["int", "float", "str", "bool"]
-    index: bool = False
-    full_text_search: bool = False
+def add_refresh_attributes(d: dict[str, str]) -> dict:
+    data = {}
+    for col, t in d.items():
+        data[col] = {"type": t, "index": False, "full_text_search": False}
 
-
-class RefreshBody(BaseModel):
-    url: str
-    custom_schema: Optional[dict[str, RefreshHashModelInfo]]  # key = column name
-
-
-@app.post("/")
-async def dynamic_refresh(directions: RefreshBody):
-    """
-    Refreshes the Redis database with the latest ChEMBL-NTD data.
-    """
-    # ping redis db
-    if not ping_redis():
-        return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
-        )
-
-    if not directions.url.endswith(".csv"):
-        return JSONResponse(
-            status_code=404, content={"message": "Only csv files are supported"}
-        )
-
-    # download csv file to init db
-    try:
-        logger.info("Downloading data.")
-        # TODO: get temp file loc dynamically
-        temp_file_loc = temp_location()
-        info = urllib.request.urlretrieve(directions.url, temp_file_loc)
-        assert info[0] == temp_file_loc
-        assert os.path.exists(info[0])
-    except AssertionError as e:
-        logger.error(f"Temp file {temp_file_loc} does not exist or is not correct.")
-        logger.error(e)
-        remove_file(info[0])
-        remove_file(temp_file_loc)
-        return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
-        )
-    except Exception as e:
-        logger.error(f"Error downloading file {directions.url}.")
-        logger.error(e)
-        remove_file(temp_file_loc)
-        return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
-        )
-
-    # load data into pandas df & clean
-    logger.info("Loading data into pandas df.")
-    df = pd.read_csv(info[0], header=0, sep=",", index_col=False)
-    df = clean_column_names(df)
-    logger.info(f"Dataframe columns: {df.columns}.")
-    logger.info(f"Dataframe shape: {df.shape}.")
-
-    # get new class based on attributes
-    models = {
-        "hash": {"name": "CsvHashModel", "model": HashModel, "instance": None},
-        "base": {"name": "CsvBaseModel", "model": BaseModel, "instance": None},
-    }
-
-    try:
-        for k, d in models.items():
-            # ref: https://stackoverflow.com/questions/59412427/set-module-on-class-created-with-types-new-class
-            # ref: https://python-course.eu/oop/dynamically-creating-classes-with-type.php
-
-            # add dynamic class attribute annotations
-            class_body = {
-                "__annotations__": {
-                    col: TYPE_ANNOTATIONS[t.type]
-                    for col, t in directions.custom_schema.items()
-                },
-            }
-
-            # init with field values if hash
-            if k == "hash":
-                for col, t in directions.custom_schema.items():
-                    if t.index:
-                        class_body[col] = Field(
-                            index=t.index, full_text_search=t.full_text_search
-                        )
-            elif k == "base":
-                class_body["model_config"] = {
-                    "json_schema_extra": {
-                        "examples": [
-                            {
-                                col: random_value(8, t.type)
-                                for col, t in directions.custom_schema.items()
-                            }
-                        ]
-                    }
-                }
-
-            models[k]["instance"] = types.new_class(
-                d["name"],
-                (d["model"],),
-                {},
-                lambda ns: ns.update(class_body),
-            )
-    except Exception:
-        logger.error(traceback.format_exc())
-        del df
-        remove_file(temp_file_loc)
-        return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
-        )
-
-    # flush redis db
-    if not flush_redis():
-        remove_file(temp_file_loc)
-        del df
-        return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
-        )
-
-    # load data into redis db
-    for line_num, (i, row) in enumerate(df.iterrows()):
-        x = models["hash"]["instance"](**row.to_dict())  # Upload to Redis
-        x.save()
-        # logger.info(msg=x.dict())
-        # break
-
-    del df
-    remove_file(temp_file_loc)
-
-
-class GetColumnsBody(BaseModel):
-    url: str
+    return data
 
 
 @app.post("/columns")
@@ -407,9 +318,12 @@ async def geuss_columns(body: GetColumnsBody):
             status_code=500, content={"message": "Internal server error"}
         )
 
+    # get encoding
+    encoding = get_encoding(temp_file_loc)
+
     # load data into pandas df & clean
     logger.info("Loading data into pandas df.")
-    df = pd.read_csv(info[0], header=0, sep=",", index_col=False)
+    df = pd.read_csv(info[0], header=0, sep=",", index_col=False, encoding=encoding)
     df.columns = (
         df.columns.str.strip()
         .str.lower()
@@ -423,7 +337,9 @@ async def geuss_columns(body: GetColumnsBody):
     for k, v in s.items():
         s[k] = v.__name__
 
-    msg = {"guessed_schema": s}
+    s = add_refresh_attributes(s)
+
+    msg = {"guessed_schema": s, "url": body.url}
     del df
     remove_file(temp_file_loc)
 
@@ -468,8 +384,9 @@ async def get_chemblntd(
     """
     Returns the ChEMBL-NTD entry for the given hash id in the Redis database.
     """
+    print(CUSTOM_CLASSES)
     try:
-        result = ChembtlntdRedis.get(hash)
+        result = CUSTOM_CLASSES["hash"]["instance"].get(hash)
         msg = {"id": hash, "value": result.dict()}
 
         return JSONResponse(status_code=200, content=msg)
@@ -552,15 +469,8 @@ async def search_by_smiles(smiles: SmilesBody):
         )
 
 
-@app.post(
-    "/refresh",
-    response_model=Message,
-    responses={
-        200: {"message": "Refresh complete. Data loaded into redis db."},
-        500: {"message": "Internal server error"},
-    },
-)
-async def refresh():
+@app.post("/refresh")
+async def dynamic_refresh(directions: RefreshBody):
     """
     Refreshes the Redis database with the latest ChEMBL-NTD data.
     """
@@ -570,11 +480,18 @@ async def refresh():
             status_code=500, content={"message": "Internal server error"}
         )
 
+    # check url
+    if not directions.url.endswith(".csv"):
+        return JSONResponse(
+            status_code=404, content={"message": "Only csv files are supported"}
+        )
+
     # download csv file to init db
     try:
         logger.info("Downloading data.")
+        # TODO: get temp file loc dynamically
         temp_file_loc = temp_location()
-        info = urllib.request.urlretrieve(CSV_URL, temp_file_loc)
+        info = urllib.request.urlretrieve(directions.url, temp_file_loc)
         assert info[0] == temp_file_loc
         assert os.path.exists(info[0])
     except AssertionError as e:
@@ -586,26 +503,69 @@ async def refresh():
             status_code=500, content={"message": "Internal server error"}
         )
     except Exception as e:
-        logger.error(f"Error downloading file {CSV_URL}.")
+        logger.error(f"Error downloading file {directions.url}.")
         logger.error(e)
         remove_file(temp_file_loc)
         return JSONResponse(
             status_code=500, content={"message": "Internal server error"}
         )
 
+    # get encoding
+    encoding = get_encoding(temp_file_loc)
+
     # load data into pandas df & clean
-    # TODO: exception handling here
     logger.info("Loading data into pandas df.")
-    df = pd.read_csv(info[0], header=0, sep=",", index_col=False)
-    df.columns = (
-        df.columns.str.strip()
-        .str.lower()
-        .str.replace(" ", "_")
-        .str.replace("(", "")
-        .str.replace(")", "")
-        .str.replace("%", "pct")
-    )
+    df = pd.read_csv(info[0], header=0, sep=",", index_col=False, encoding=encoding)
+    df = clean_column_names(df)
+    logger.info(f"Dataframe columns: {df.columns}.")
     logger.info(f"Dataframe shape: {df.shape}.")
+
+    # setup dynamic classes for redis object model
+    try:
+        for k, d in CUSTOM_CLASSES.items():
+            # ref: https://stackoverflow.com/questions/59412427/set-module-on-class-created-with-types-new-class
+            # ref: https://python-course.eu/oop/dynamically-creating-classes-with-type.php
+
+            # add dynamic class attribute annotations
+            class_body = {
+                "__annotations__": {
+                    col: TYPE_ANNOTATIONS[t.type]
+                    for col, t in directions.custom_schema.items()
+                },
+            }
+
+            # init with field values if hash
+            if k == "hash":
+                for col, t in directions.custom_schema.items():
+                    if t.index:
+                        class_body[col] = Field(
+                            index=t.index, full_text_search=t.full_text_search
+                        )
+            # else add examples for open api spec
+            elif k == "base":
+                class_body["model_config"] = {
+                    "json_schema_extra": {
+                        "examples": [
+                            {
+                                col: random_value(8, t.type)
+                                for col, t in directions.custom_schema.items()
+                            }
+                        ]
+                    }
+                }
+
+            # create new class
+            CUSTOM_CLASSES[k]["instance"] = class_with_types(
+                d["name"], (d["model"],), class_body
+            )
+
+    except Exception:
+        logger.error(traceback.format_exc())
+        del df
+        remove_file(temp_file_loc)
+        return JSONResponse(
+            status_code=500, content={"message": "Internal server error"}
+        )
 
     # flush redis db
     if not flush_redis():
@@ -615,16 +575,25 @@ async def refresh():
             status_code=500, content={"message": "Internal server error"}
         )
 
+    print(CUSTOM_CLASSES)
+
     # load data into redis db
-    # TODO: exception handling and handle objects not added
+    errors = 0
     for line_num, (i, row) in enumerate(df.iterrows()):
-        x = ChembtlntdRedis(**row.to_dict())
-        x.save()
+        try:
+            x = CUSTOM_CLASSES["hash"]["instance"](**row.to_dict())  # Upload to Redis
+            x.save()
+        except Exception as e:
+            logger.error(e)
+            errors += 1
+
         if ((line_num + 1) % 100) == 0:
             logger.info(
-                f"Total rows: {line_num+1}. ({round(100*(line_num + 1)/len(df), 1)})%"
+                f"Total rows processed: {line_num+1}. ({round(100*(line_num + 1)/len(df), 1)})%"
             )
-    logger.info(f"Final data load into Redis: {len(df)} total rows.")
+    logger.info(
+        f"Final data load into Redis: {len(df)} total rows processed. {errors} missed rows."
+    )
 
     # create indices by running Migrate for Redis OM
     try:

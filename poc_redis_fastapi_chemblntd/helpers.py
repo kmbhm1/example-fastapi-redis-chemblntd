@@ -1,7 +1,7 @@
 import random
 import string
 from dataclasses import dataclass
-from typing import Union, Iterable
+from typing import Any, Union, Iterable
 import types
 
 
@@ -24,7 +24,7 @@ type_annotations = {
 }
 
 
-def class_with_types(name: str, bases: Iterable[object], kwds: dict[str, str]) -> type:
+def class_with_types(name: str, bases: Iterable[object], kwds: dict) -> type:
     """Create a class with custom metadata & attributes.
 
     Refer to https://docs.python.org/3/library/types.html?highlight=type#\
@@ -43,9 +43,7 @@ def class_with_types(name: str, bases: Iterable[object], kwds: dict[str, str]) -
         >>> class_with_types("Foo", (object, HashModel), [Attribute("bar", int)])
         <class '__main__.Foo'>
     """
-    return types.new_class(
-        name, bases, {}, {k: type_annotations[v] for k, v in kwds.items()}
-    )
+    return types.new_class(name, bases, {}, lambda ns: ns.update(kwds))
 
 
 def random_value(length: int = 10, type: str = "str") -> Union[int, float, str, bool]:

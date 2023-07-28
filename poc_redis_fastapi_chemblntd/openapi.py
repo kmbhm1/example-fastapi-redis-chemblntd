@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Literal, Optional
 from pydantic import BaseModel
 from fastapi import Body
 
@@ -35,6 +35,21 @@ fast_api_metadata = {
     "contact": {"name": "K", "email": "kmbhm1@gmail.com"},
     "license_info": {"name": "Apache 2.0", "identifier": "MIT"},
 }
+
+
+class RefreshHashModelInfo(BaseModel):
+    type: Literal["int", "float", "str", "bool"]
+    index: bool = False
+    full_text_search: bool = False
+
+
+class RefreshBody(BaseModel):
+    url: str
+    custom_schema: Optional[dict[str, RefreshHashModelInfo]]  # key = column name
+
+
+class GetColumnsBody(BaseModel):
+    url: str
 
 
 # Reponses
