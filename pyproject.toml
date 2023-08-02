@@ -16,6 +16,8 @@ redis = "^4.6.0"
 redis-om = "^0.2.1"
 gunicorn = "^21.2.0"
 chardet = "^5.1.0"
+xlrd = "^2.0.1"
+openpyxl = "^3.1.2"
 
 
 [build-system]

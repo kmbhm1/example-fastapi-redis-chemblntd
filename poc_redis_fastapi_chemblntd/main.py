@@ -1,12 +1,12 @@
 import sys
 import traceback
 import types
-from typing import Literal, Optional, Type
+from typing import Type
 import chardet
 from fastapi import FastAPI
 from fastapi.params import Path
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 import redis
 import pandas as pd
 import tempfile
@@ -57,6 +57,7 @@ CUSTOM_CLASSES = {
     "hash": {"name": "CsvHashModel", "model": HashModel, "instance": None},
     "base": {"name": "CsvBaseModel", "model": BaseModel, "instance": None},
 }
+ACCEPTED_FILE_TYPES = ["csv", "tsv", "xlsx", "xls"]
 
 
 def remove_file(path: str) -> None:
@@ -119,8 +120,9 @@ def flush_redis() -> bool:
         return False
 
 
-def temp_location() -> str:
-    return f"{TEMP_DIR}/{str(uuid.uuid4())}.csv"
+def temp_location(ending: str = "csv") -> str:
+    """Get the location of a temporary file."""
+    return f"{TEMP_DIR}/{str(uuid.uuid4())}.{ending}"
 
 
 def is_float(s: str) -> bool:
@@ -287,18 +289,36 @@ def add_refresh_attributes(d: dict[str, str]) -> dict:
     return data
 
 
+def fill_na(df: pd.DataFrame, schema: dict[str, str]) -> pd.DataFrame:
+    for col, t in schema.items():
+        if t == "int":
+            df[col] = df[col].fillna(0)
+        elif t == "float":
+            df[col] = df[col].fillna(0.0)
+        elif t == "bool":
+            df[col] = df[col].fillna(False)
+        else:
+            df[col] = df[col].fillna("")
+
+    return df
+
+
 @app.post("/columns")
 async def geuss_columns(body: GetColumnsBody):
-    if not body.url.endswith(".csv"):
+    if not any(body.url.endswith(e) for e in ACCEPTED_FILE_TYPES):
         return JSONResponse(
-            status_code=404, content={"message": "Only csv files are supported"}
+            status_code=404,
+            content={
+                "message": f"File type is not supported. Use one of the following: {ACCEPTED_FILE_TYPES.join(', ')}"
+            },
         )
+
+    ending = body.url.split(".")[-1]
 
     # download csv file to init db
     try:
         logger.info("Downloading data.")
-        # TODO: get temp file loc dynamically
-        temp_file_loc = temp_location()
+        temp_file_loc = temp_location(ending)
         info = urllib.request.urlretrieve(body.url, temp_file_loc)
         assert info[0] == temp_file_loc
         assert os.path.exists(info[0])
@@ -323,7 +343,15 @@ async def geuss_columns(body: GetColumnsBody):
 
     # load data into pandas df & clean
     logger.info("Loading data into pandas df.")
-    df = pd.read_csv(info[0], header=0, sep=",", index_col=False, encoding=encoding)
+    if ending == "csv":
+        df = pd.read_csv(info[0], header=0, sep=",", index_col=False, encoding=encoding)
+    elif ending == "tsv":
+        df = pd.read_table(
+            info[0], header=0, sep="\t", index_col=False, encoding=encoding
+        )
+    elif ending == "xlsx" or ending == "xls":
+        df = pd.read_excel(info[0], header=0, index_col=False)
+
     df.columns = (
         df.columns.str.strip()
         .str.lower()
@@ -470,7 +498,7 @@ async def search_by_smiles(smiles: SmilesBody):
 
 
 @app.post("/refresh")
-async def dynamic_refresh(directions: RefreshBody):
+async def dynamic_refresh(body: RefreshBody):
     """
     Refreshes the Redis database with the latest ChEMBL-NTD data.
     """
@@ -481,17 +509,22 @@ async def dynamic_refresh(directions: RefreshBody):
         )
 
     # check url
-    if not directions.url.endswith(".csv"):
+    if not any(body.url.endswith(e) for e in ACCEPTED_FILE_TYPES):
         return JSONResponse(
-            status_code=404, content={"message": "Only csv files are supported"}
+            status_code=404,
+            content={
+                "message": f"File type is not supported. Use one of the following: {ACCEPTED_FILE_TYPES.join(', ')}"
+            },
         )
+
+    ending = body.url.split(".")[-1]
 
     # download csv file to init db
     try:
         logger.info("Downloading data.")
         # TODO: get temp file loc dynamically
-        temp_file_loc = temp_location()
-        info = urllib.request.urlretrieve(directions.url, temp_file_loc)
+        temp_file_loc = temp_location("csv")
+        info = urllib.request.urlretrieve(body.url, temp_file_loc)
         assert info[0] == temp_file_loc
         assert os.path.exists(info[0])
     except AssertionError as e:
@@ -503,7 +536,7 @@ async def dynamic_refresh(directions: RefreshBody):
             status_code=500, content={"message": "Internal server error"}
         )
     except Exception as e:
-        logger.error(f"Error downloading file {directions.url}.")
+        logger.error(f"Error downloading file {body.url}.")
         logger.error(e)
         remove_file(temp_file_loc)
         return JSONResponse(
@@ -515,8 +548,18 @@ async def dynamic_refresh(directions: RefreshBody):
 
     # load data into pandas df & clean
     logger.info("Loading data into pandas df.")
-    df = pd.read_csv(info[0], header=0, sep=",", index_col=False, encoding=encoding)
+    if ending == "csv":
+        df = pd.read_csv(info[0], header=0, sep=",", index_col=False, encoding=encoding)
+        df.fil
+    elif ending == "tsv":
+        df = pd.read_table(
+            info[0], header=0, sep="\t", index_col=False, encoding=encoding
+        )
+    elif ending == "xlsx" or ending == "xls":
+        df = pd.read_excel(info[0], header=0, index_col=False)
+
     df = clean_column_names(df)
+    df = fill_na(df, {k: v.type for k, v in body.custom_schema.items()})
     logger.info(f"Dataframe columns: {df.columns}.")
     logger.info(f"Dataframe shape: {df.shape}.")
 
@@ -530,13 +573,13 @@ async def dynamic_refresh(directions: RefreshBody):
             class_body = {
                 "__annotations__": {
                     col: TYPE_ANNOTATIONS[t.type]
-                    for col, t in directions.custom_schema.items()
+                    for col, t in body.custom_schema.items()
                 },
             }
 
             # init with field values if hash
             if k == "hash":
-                for col, t in directions.custom_schema.items():
+                for col, t in body.custom_schema.items():
                     if t.index:
                         class_body[col] = Field(
                             index=t.index, full_text_search=t.full_text_search
@@ -548,7 +591,7 @@ async def dynamic_refresh(directions: RefreshBody):
                         "examples": [
                             {
                                 col: random_value(8, t.type)
-                                for col, t in directions.custom_schema.items()
+                                for col, t in body.custom_schema.items()
                             }
                         ]
                     }
@@ -585,6 +628,7 @@ async def dynamic_refresh(directions: RefreshBody):
             x.save()
         except Exception as e:
             logger.error(e)
+            logger.error(msg=row.to_dict())
             errors += 1
 
         if ((line_num + 1) % 100) == 0:
