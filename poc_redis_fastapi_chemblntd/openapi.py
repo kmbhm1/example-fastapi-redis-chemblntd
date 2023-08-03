@@ -44,6 +44,7 @@ class RefreshHashModelInfo(BaseModel):
 
 
 class RefreshBody(BaseModel):
+    name: str
     url: str
     custom_schema: Optional[dict[str, RefreshHashModelInfo]]  # key = column name
 

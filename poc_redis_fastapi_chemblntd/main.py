@@ -54,10 +54,23 @@ TYPE_ANNOTATIONS = {
     "bool": bool,
 }
 CUSTOM_CLASSES = {
-    "hash": {"name": "CsvHashModel", "model": HashModel, "instance": None},
-    "base": {"name": "CsvBaseModel", "model": BaseModel, "instance": None},
+    "hash": {},
+    "base": {},
 }
 ACCEPTED_FILE_TYPES = ["csv", "tsv", "xlsx", "xls"]
+
+
+def get_proper_class_name(name: str) -> str:
+    return name.strip().replace(" ", "").capitalize()
+
+
+def get_base_class(model: str) -> dict:
+    if model == "hash":
+        return {"model": HashModel, "instance": None}
+    elif model == "base":
+        return {"model": BaseModel, "instance": None}
+    else:
+        raise ValueError(f"Model {model} is not supported.")
 
 
 def remove_file(path: str) -> None:
@@ -118,6 +131,23 @@ def flush_redis() -> bool:
         logger.error("Error flushing redis db. Exiting.")
         logger.error(e)
         return False
+
+
+def clear_ns(ns):
+    """
+    Clears a namespace
+    :param ns: str, namespace i.e your:prefix
+    :return: int, cleared keys
+    """
+    cursor = "0"
+    ns_keys = ns + "*"
+    CHUNK_SIZE = 5000
+    while cursor != 0:
+        cursor, keys = r.scan(cursor=cursor, match=ns_keys, count=CHUNK_SIZE)
+        if keys:
+            r.delete(*keys)
+
+    return True
 
 
 def temp_location(ending: str = "csv") -> str:
@@ -375,11 +405,42 @@ async def geuss_columns(body: GetColumnsBody):
 
 
 @app.get(
-    "/chemblntd/hash",
+    "/hash",
     response_model=Hashes,
     responses={500: {"message": "Internal server error"}},
 )
-async def get_hashes():
+async def get_indices():
+    """
+    Returns a list of all valid indices in the Redis database.
+    """
+    try:
+        keys = r.keys()
+        indices = list(set(k.split(":")[1].split(".")[-1] for k in keys))
+
+        logger.info(f"Available Indices: {indices}")
+        msg = {"indices": indices}
+
+        return JSONResponse(status_code=200, content=msg)
+    except Exception as e:
+        logger.error(e)
+        return JSONResponse(
+            status_code=500, content={"message": "Internal server error"}
+        )
+
+
+# TODO: add pagination here
+@app.get(
+    "/hash/{index_name}",
+    response_model=Hashes,
+    responses={500: {"message": "Internal server error"}},
+)
+async def get_hashes(
+    index_name: str = Path(
+        title="The index name in Redis",
+        description="The identifier for which to identify an entry in the associated Redis Db.",
+        example="chemblntd",
+    ),
+):
     """
     Returns a list of all valid hash ids in the Redis database.
     """
@@ -387,7 +448,11 @@ async def get_hashes():
         keys = r.keys()
         hashes = []
         if len(keys) != 0:
-            hashes = [k.split(":")[2] for k in keys]
+            hashes = [
+                k.split(":")[2]
+                for k in keys
+                if k.split(":")[1].split(".")[-1] == index_name
+            ]
             hashes.sort()
 
         logger.info(f"Number of hashes: {len(hashes)}")
@@ -401,21 +466,28 @@ async def get_hashes():
         )
 
 
-@app.get("/chemblntd/hash/{hash}", response_model=Item, responses={**responses})
-async def get_chemblntd(
+@app.get("/hash/{index_name}/{hash}", response_model=Item, responses={**responses})
+async def get_hash(
+    index_name: str = Path(
+        title="The index name in Redis",
+        description="The identifier for which to identify an entry in the associated Redis Db.",
+        example="chemblntd",
+    ),
     hash: str = Path(
         title="The hash key in Redis",
         description="The identifier for which to identify an entry in the associated Redis Db.",
         example="01H5T42K2AEA7682MR9XD7Y2S4",
-    )
+    ),
 ):
     """
     Returns the ChEMBL-NTD entry for the given hash id in the Redis database.
     """
     print(CUSTOM_CLASSES)
+    if index_name not in CUSTOM_CLASSES["hash"]:
+        return JSONResponse(404, {"message": "Index name not found."})
     try:
-        result = CUSTOM_CLASSES["hash"]["instance"].get(hash)
-        msg = {"id": hash, "value": result.dict()}
+        result = CUSTOM_CLASSES["hash"][index_name]["instance"].get(hash)
+        msg = {"id": hash, "name": index_name, "value": result.dict()}
 
         return JSONResponse(status_code=200, content=msg)
     except NotFoundError:
@@ -550,7 +622,6 @@ async def dynamic_refresh(body: RefreshBody):
     logger.info("Loading data into pandas df.")
     if ending == "csv":
         df = pd.read_csv(info[0], header=0, sep=",", index_col=False, encoding=encoding)
-        df.fil
     elif ending == "tsv":
         df = pd.read_table(
             info[0], header=0, sep="\t", index_col=False, encoding=encoding
@@ -598,8 +669,10 @@ async def dynamic_refresh(body: RefreshBody):
                 }
 
             # create new class
-            CUSTOM_CLASSES[k]["instance"] = class_with_types(
-                d["name"], (d["model"],), class_body
+            name = get_proper_class_name(body.name) + k.capitalize()
+            CUSTOM_CLASSES[k][body.name] = get_base_class(k)
+            CUSTOM_CLASSES[k][body.name]["instance"] = class_with_types(
+                body.name, (CUSTOM_CLASSES[k][body.name]["model"],), class_body
             )
 
     except Exception:
@@ -611,12 +684,15 @@ async def dynamic_refresh(body: RefreshBody):
         )
 
     # flush redis db
-    if not flush_redis():
-        remove_file(temp_file_loc)
-        del df
-        return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
-        )
+    # TODO: adapt this to remove just the single object / redis index
+    # if not flush_redis():
+    #     remove_file(temp_file_loc)
+    #     del df
+    #     return JSONResponse(
+    #         status_code=500, content={"message": "Internal server error"}
+    #     )
+    logger.info(f"Flushing redis db for index {body.name}.")
+    clear_ns(body.name)
 
     print(CUSTOM_CLASSES)
 
@@ -624,7 +700,10 @@ async def dynamic_refresh(body: RefreshBody):
     errors = 0
     for line_num, (i, row) in enumerate(df.iterrows()):
         try:
-            x = CUSTOM_CLASSES["hash"]["instance"](**row.to_dict())  # Upload to Redis
+            name = get_proper_class_name(body.name) + "Hash"
+            x = CUSTOM_CLASSES["hash"][body.name]["instance"](
+                **row.to_dict()
+            )  # Upload to Redis
             x.save()
         except Exception as e:
             logger.error(e)
