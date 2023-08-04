@@ -15,6 +15,7 @@ import os
 import urllib.request
 import uuid
 from redis_om import NotFoundError, Migrator, HashModel, Field
+from fastapi_pagination import Page, add_pagination, paginate
 
 from poc_redis_fastapi_chemblntd.chemblntd import ChembtlntdRedis
 from poc_redis_fastapi_chemblntd.helpers import class_with_types, random_value
@@ -39,6 +40,9 @@ logger = logging.getLogger(__name__)
 
 # init fastapi
 app = FastAPI()
+
+# add pagination
+add_pagination(app)
 
 # init redis
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")  # for docker-compose
@@ -406,7 +410,7 @@ async def geuss_columns(body: GetColumnsBody):
 
 @app.get(
     "/hash",
-    response_model=Hashes,
+    response_model=Page[str],
     responses={500: {"message": "Internal server error"}},
 )
 async def get_indices():
@@ -415,12 +419,12 @@ async def get_indices():
     """
     try:
         keys = r.keys()
-        indices = list(set(k.split(":")[1].split(".")[-1] for k in keys))
+        indices = list(set(".".join(k.split(":")[1].split(".")[-2:]) for k in keys))
 
         logger.info(f"Available Indices: {indices}")
-        msg = {"indices": indices}
-
-        return JSONResponse(status_code=200, content=msg)
+        # msg = {"indices": indices}
+        return paginate(indices)
+        # return JSONResponse(status_code=200, content=msg)
     except Exception as e:
         logger.error(e)
         return JSONResponse(
@@ -428,10 +432,9 @@ async def get_indices():
         )
 
 
-# TODO: add pagination here
 @app.get(
     "/hash/{index_name}",
-    response_model=Hashes,
+    response_model=Page[str],
     responses={500: {"message": "Internal server error"}},
 )
 async def get_hashes(
@@ -456,9 +459,9 @@ async def get_hashes(
             hashes.sort()
 
         logger.info(f"Number of hashes: {len(hashes)}")
-        msg = {"hashes": hashes}
+        return paginate(hashes)
 
-        return JSONResponse(status_code=200, content=msg)
+        # return JSONResponse(status_code=200, content=msg)
     except Exception as e:
         logger.error(e)
         return JSONResponse(

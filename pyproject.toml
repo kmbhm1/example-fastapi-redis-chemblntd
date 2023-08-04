@@ -18,6 +18,7 @@ gunicorn = "^21.2.0"
 chardet = "^5.1.0"
 xlrd = "^2.0.1"
 openpyxl = "^3.1.2"
+fastapi-pagination = "^0.12.6"
 
 
 [build-system]
