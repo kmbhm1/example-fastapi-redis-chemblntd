@@ -1,38 +1,32 @@
-import sys
+import logging
+import os
+import tempfile
 import traceback
-import types
-from typing import Type
-import chardet
+import urllib.request
+
+import pandas as pd
+import redis
 from fastapi import FastAPI
 from fastapi.params import Path
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ValidationError
-import redis
-import pandas as pd
-import tempfile
-import logging
-import os
-import urllib.request
-import uuid
-from redis_om import NotFoundError, Migrator, HashModel, Field
 from fastapi_pagination import Page, add_pagination, paginate
+from redis_om import Field, Migrator, NotFoundError
 
 from poc_redis_fastapi_chemblntd.chemblntd import ChembtlntdRedis
-from poc_redis_fastapi_chemblntd.helpers import class_with_types, random_value
+from poc_redis_fastapi_chemblntd.helpers import *
 from poc_redis_fastapi_chemblntd.openapi import (
     GetColumnsBody,
-    Hashes,
+    Item,
     Items,
-    Message,
     RefreshBody,
     SmilesBody,
     responses,
-    Item,
 )
 
 # logger setup
 logging.basicConfig(
-    level=logging.INFO, format="%(levelname)s:\t  %(name)s [%(lineno)s] - %(message)s"
+    level=logging.INFO,
+    format="%(levelname)s:\t  %(name)s [%(lineno)s] - %(message)s",
 )
 
 # get root logger
@@ -57,293 +51,21 @@ TYPE_ANNOTATIONS = {
     "str": str,
     "bool": bool,
 }
-CUSTOM_CLASSES = {
+CUSTOM_CLASSES = {  # type: ignore
     "hash": {},
     "base": {},
 }
 ACCEPTED_FILE_TYPES = ["csv", "tsv", "xlsx", "xls"]
 
 
-def get_proper_class_name(name: str) -> str:
-    return name.strip().replace(" ", "").capitalize()
-
-
-def get_base_class(model: str) -> dict:
-    if model == "hash":
-        return {"model": HashModel, "instance": None}
-    elif model == "base":
-        return {"model": BaseModel, "instance": None}
-    else:
-        raise ValueError(f"Model {model} is not supported.")
-
-
-def remove_file(path: str) -> None:
-    """Delete a file if it exists.
-
-    Args:
-        path (str): The path to the file to delete.
-
-    Examples:
-        >>> remove_file("foo.txt")
-    """
-
-    try:
-        os.remove(path)
-    except OSError:
-        logger.warning(f"File {path} can not be removed.")
-        pass
-
-
-def ping_redis() -> bool:
-    """Ping the Redis database to check that it is up.
-
-    Uses the `ping` method of the `redis` package to check that the Redis database is up.
-
-    Returns:
-        bool: True if the Redis database is up, False otherwise.
-
-    Examples:
-        >>> ping_redis()
-        True
-    """
-    try:
-        logger.info("Pinging redis db.")
-        r.ping()
-        logger.info("Redis db is up.")
-        return True
-    except redis.exceptions.ConnectionError as e:
-        logger.error("Redis db is down. Exiting.")
-        logger.error(e)
-        return False
-
-
-def flush_redis() -> bool:
-    """Flush the Redis database.
-
-    Returns:
-        bool: True if the Redis database is flushed, False is there is an Exception thrown.
-
-    Examples:
-        >>> flush_redis()
-        True
-    """
-    try:
-        logger.info("Flushing redis db.")
-        r.flushdb()
-        return True
-    except Exception as e:
-        logger.error("Error flushing redis db. Exiting.")
-        logger.error(e)
-        return False
-
-
-def clear_ns(ns):
-    """
-    Clears a namespace
-    :param ns: str, namespace i.e your:prefix
-    :return: int, cleared keys
-    """
-    cursor = "0"
-    ns_keys = ns + "*"
-    CHUNK_SIZE = 5000
-    while cursor != 0:
-        cursor, keys = r.scan(cursor=cursor, match=ns_keys, count=CHUNK_SIZE)
-        if keys:
-            r.delete(*keys)
-
-    return True
-
-
-def temp_location(ending: str = "csv") -> str:
-    """Get the location of a temporary file."""
-    return f"{TEMP_DIR}/{str(uuid.uuid4())}.{ending}"
-
-
-def is_float(s: str) -> bool:
-    """Check if a string is a float.
-
-    Args:
-        s (str): The string to check.
-
-    Returns:
-        bool: True if the string is a float, False otherwise.
-
-    Examples:
-        >>> is_float("1.0")
-        True
-        >>> is_float("1")
-        False
-    """
-    try:
-        float(s)
-        return True
-    except ValueError:
-        return False
-
-
-def is_int(s: str) -> bool:
-    """Check if a string is an integer.
-
-    Args:
-        s (str): The string to check.
-
-    Returns:
-        bool: True if the string is an integer, False otherwise.
-
-    Examples:
-        >>> is_int("1")
-        True
-        >>> is_int("1.0")
-        False
-    """
-    try:
-        return float(s).is_integer()
-    except ValueError:
-        return False
-
-
-def is_bool(s: str) -> bool:
-    """Check if a string is a boolean.
-
-    Args:
-        s (str): The string to check.
-
-    Returns:
-        bool: True if the string is a boolean, False otherwise.
-
-    Examples:
-        >>> is_bool("True")
-        True
-        >>> is_bool("1")
-        False
-    """
-    if s.lower() in ["true", "false"]:
-        return True
-    else:
-        return False
-
-
-def get_encoding(file: str) -> str:
-    """Get the encoding of a file.
-
-    Args:
-        file (str): The path to the file to get the encoding of.
-
-    Returns:
-        str: The encoding of the file.
-
-    Examples:
-        >>> get_encoding("foo.txt")
-        "utf-8"
-    """
-    try:
-        with open(file, "rb") as f:
-            rawdata = f.read(10000)
-    except Exception as e:
-        logger.error(f"Error reading file {file}.")
-        logger.error(e)
-        return "utf-8"
-
-    try:
-        return chardet.detect(rawdata)["encoding"]
-    except Exception as e:
-        logger.error(f"Error detecting encoding of file {file}.")
-        logger.error(e)
-        return "utf-8"
-
-
-def geuss_schema(df: pd.DataFrame, sample_size: int = 25) -> dict[str, Type]:
-    """Geuss the schema of a pandas DataFrame.
-
-    Args:
-        df (pd.DataFrame): The pandas DataFrame to geuss the schema of.
-
-    Returns:
-        dict[str, Type]: A dictionary of the column names and their associated types.
-
-    Examples:
-        >>> df = pd.DataFrame({"a": [1, 2, 3], "b": [1.0, 2.0, 3.0]})
-        >>> geuss_schema(df)
-        {"a": int, "b": float}
-    """
-    schema = {}
-    first_rows = df.head(sample_size)
-
-    for col in first_rows.columns:
-        c = first_rows[col].to_list()
-
-        if first_rows[col].dtype == "int64" or all(is_int(e) for e in c):
-            schema[col] = int
-        elif first_rows[col].dtype == "float64" or all(is_float(e) for e in c):
-            schema[col] = float
-        elif first_rows[col].dtype == "object":
-            schema[col] = str
-        elif first_rows[col].dtype == "bool" or all(is_bool(e) for e in c):
-            schema[col] = bool
-        else:
-            schema[col] = str
-
-    return schema
-
-
-def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
-    """Clean the column names of a pandas DataFrame.
-
-    Args:
-        df (pd.DataFrame): The pandas DataFrame to clean the column names of.
-
-    Returns:
-        pd.DataFrame: The pandas DataFrame with the cleaned column names.
-
-    Examples:
-        >>> df = pd.DataFrame({"A": [1, 2, 3], "B": [1.0, 2.0, 3.0]})
-        >>> clean_column_names(df)
-           a    b
-        0  1  1.0
-        1  2  2.0
-        2  3  3.0
-    """
-    df.columns = (
-        df.columns.str.strip()
-        .str.lower()
-        .str.replace(" ", "_")
-        .str.replace("(", "")
-        .str.replace(")", "")
-        .str.replace("%", "pct")
-    )
-
-    return df
-
-
-def add_refresh_attributes(d: dict[str, str]) -> dict:
-    data = {}
-    for col, t in d.items():
-        data[col] = {"type": t, "index": False, "full_text_search": False}
-
-    return data
-
-
-def fill_na(df: pd.DataFrame, schema: dict[str, str]) -> pd.DataFrame:
-    for col, t in schema.items():
-        if t == "int":
-            df[col] = df[col].fillna(0)
-        elif t == "float":
-            df[col] = df[col].fillna(0.0)
-        elif t == "bool":
-            df[col] = df[col].fillna(False)
-        else:
-            df[col] = df[col].fillna("")
-
-    return df
-
-
 @app.post("/columns")
 async def geuss_columns(body: GetColumnsBody):
     if not any(body.url.endswith(e) for e in ACCEPTED_FILE_TYPES):
+        accepted_files = ".".join(ACCEPTED_FILE_TYPES)
         return JSONResponse(
             status_code=404,
             content={
-                "message": f"File type is not supported. Use one of the following: {ACCEPTED_FILE_TYPES.join(', ')}"
+                "message": f"File type is not supported. Use one of the following: {accepted_files}",
             },
         )
 
@@ -362,14 +84,16 @@ async def geuss_columns(body: GetColumnsBody):
         remove_file(info[0])
         remove_file(temp_file_loc)
         return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
+            status_code=500,
+            content={"message": "Internal server error"},
         )
     except Exception as e:
         logger.error(f"Error downloading file {body.url}.")
         logger.error(e)
         remove_file(temp_file_loc)
         return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
+            status_code=500,
+            content={"message": "Internal server error"},
         )
 
     # get encoding
@@ -381,7 +105,11 @@ async def geuss_columns(body: GetColumnsBody):
         df = pd.read_csv(info[0], header=0, sep=",", index_col=False, encoding=encoding)
     elif ending == "tsv":
         df = pd.read_table(
-            info[0], header=0, sep="\t", index_col=False, encoding=encoding
+            info[0],
+            header=0,
+            sep="\t",
+            index_col=False,
+            encoding=encoding,
         )
     elif ending == "xlsx" or ending == "xls":
         df = pd.read_excel(info[0], header=0, index_col=False)
@@ -397,7 +125,7 @@ async def geuss_columns(body: GetColumnsBody):
 
     s = geuss_schema(df)
     for k, v in s.items():
-        s[k] = v.__name__
+        s[k] = v.__name__  # type: ignore
 
     s = add_refresh_attributes(s)
 
@@ -419,7 +147,7 @@ async def get_indices():
     """
     try:
         keys = r.keys()
-        indices = list(set(".".join(k.split(":")[1].split(".")[-2:]) for k in keys))
+        indices = list({".".join(k.split(":")[1].split(".")[-2:]) for k in keys})
 
         logger.info(f"Available Indices: {indices}")
         # msg = {"indices": indices}
@@ -428,7 +156,8 @@ async def get_indices():
     except Exception as e:
         logger.error(e)
         return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
+            status_code=500,
+            content={"message": "Internal server error"},
         )
 
 
@@ -451,11 +180,7 @@ async def get_hashes(
         keys = r.keys()
         hashes = []
         if len(keys) != 0:
-            hashes = [
-                k.split(":")[2]
-                for k in keys
-                if k.split(":")[1].split(".")[-1] == index_name
-            ]
+            hashes = [k.split(":")[2] for k in keys if k.split(":")[1].split(".")[-1] == index_name]
             hashes.sort()
 
         logger.info(f"Number of hashes: {len(hashes)}")
@@ -465,7 +190,8 @@ async def get_hashes(
     except Exception as e:
         logger.error(e)
         return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
+            status_code=500,
+            content={"message": "Internal server error"},
         )
 
 
@@ -498,7 +224,8 @@ async def get_hash(
     except Exception as e:
         logger.error(e)
         return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
+            status_code=500,
+            content={"message": "Internal server error"},
         )
 
 
@@ -508,7 +235,7 @@ async def search_by_cid(
         title="PubChem CID",
         description="The identifier of the molecule in PubChem",
         example="54735847.0",
-    )
+    ),
 ):
     """
     Returns a list of ChEMBL-NTD entries for the given CID (Compound) in the Redis database.
@@ -523,7 +250,8 @@ async def search_by_cid(
     except Exception as e:
         logger.error(e)
         return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
+            status_code=500,
+            content={"message": "Internal server error"},
         )
 
 
@@ -533,7 +261,7 @@ async def search_by_sid(
         title="PubChem SID",
         description="The identifier of the substance in PubChem",
         example="121363756",
-    )
+    ),
 ):
     """
     Returns a list of ChEMBL-NTD entries for the given SID (Substance) in the Redis database.
@@ -548,7 +276,8 @@ async def search_by_sid(
     except Exception as e:
         logger.error(e)
         return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
+            status_code=500,
+            content={"message": "Internal server error"},
         )
 
 
@@ -568,7 +297,8 @@ async def search_by_smiles(smiles: SmilesBody):
     except Exception as e:
         logger.error(e)
         return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
+            status_code=500,
+            content={"message": "Internal server error"},
         )
 
 
@@ -578,9 +308,10 @@ async def dynamic_refresh(body: RefreshBody):
     Refreshes the Redis database with the latest ChEMBL-NTD data.
     """
     # ping redis db
-    if not ping_redis():
+    if not ping_redis(r):
         return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
+            status_code=500,
+            content={"message": "Internal server error"},
         )
 
     # check url
@@ -588,7 +319,7 @@ async def dynamic_refresh(body: RefreshBody):
         return JSONResponse(
             status_code=404,
             content={
-                "message": f"File type is not supported. Use one of the following: {ACCEPTED_FILE_TYPES.join(', ')}"
+                "message": f"File type is not supported. Use one of the following: {','.join(ACCEPTED_FILE_TYPES)}",
             },
         )
 
@@ -608,14 +339,16 @@ async def dynamic_refresh(body: RefreshBody):
         remove_file(info[0])
         remove_file(temp_file_loc)
         return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
+            status_code=500,
+            content={"message": "Internal server error"},
         )
     except Exception as e:
         logger.error(f"Error downloading file {body.url}.")
         logger.error(e)
         remove_file(temp_file_loc)
         return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
+            status_code=500,
+            content={"message": "Internal server error"},
         )
 
     # get encoding
@@ -627,13 +360,17 @@ async def dynamic_refresh(body: RefreshBody):
         df = pd.read_csv(info[0], header=0, sep=",", index_col=False, encoding=encoding)
     elif ending == "tsv":
         df = pd.read_table(
-            info[0], header=0, sep="\t", index_col=False, encoding=encoding
+            info[0],
+            header=0,
+            sep="\t",
+            index_col=False,
+            encoding=encoding,
         )
     elif ending == "xlsx" or ending == "xls":
         df = pd.read_excel(info[0], header=0, index_col=False)
 
     df = clean_column_names(df)
-    df = fill_na(df, {k: v.type for k, v in body.custom_schema.items()})
+    df = fill_na(df, {k: v.type for k, v in body.custom_schema.items()})  # type: ignore
     logger.info(f"Dataframe columns: {df.columns}.")
     logger.info(f"Dataframe shape: {df.shape}.")
 
@@ -646,36 +383,35 @@ async def dynamic_refresh(body: RefreshBody):
             # add dynamic class attribute annotations
             class_body = {
                 "__annotations__": {
-                    col: TYPE_ANNOTATIONS[t.type]
-                    for col, t in body.custom_schema.items()
+                    col: TYPE_ANNOTATIONS[t.type] for col, t in body.custom_schema.items()  # type: ignore
                 },
             }
 
             # init with field values if hash
             if k == "hash":
-                for col, t in body.custom_schema.items():
+                for col, t in body.custom_schema.items():  # type: ignore
                     if t.index:
                         class_body[col] = Field(
-                            index=t.index, full_text_search=t.full_text_search
+                            index=t.index,
+                            full_text_search=t.full_text_search,
                         )
             # else add examples for open api spec
             elif k == "base":
                 class_body["model_config"] = {
-                    "json_schema_extra": {
+                    "json_schema_extra": {  # type: ignore
                         "examples": [
-                            {
-                                col: random_value(8, t.type)
-                                for col, t in body.custom_schema.items()
-                            }
-                        ]
-                    }
+                            {col: random_value(8, t.type) for col, t in body.custom_schema.items()},  # type: ignore
+                        ],
+                    },
                 }
 
             # create new class
             name = get_proper_class_name(body.name) + k.capitalize()
             CUSTOM_CLASSES[k][body.name] = get_base_class(k)
             CUSTOM_CLASSES[k][body.name]["instance"] = class_with_types(
-                body.name, (CUSTOM_CLASSES[k][body.name]["model"],), class_body
+                body.name,
+                (CUSTOM_CLASSES[k][body.name]["model"],),
+                class_body,
             )
 
     except Exception:
@@ -683,19 +419,13 @@ async def dynamic_refresh(body: RefreshBody):
         del df
         remove_file(temp_file_loc)
         return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
+            status_code=500,
+            content={"message": "Internal server error"},
         )
 
     # flush redis db
-    # TODO: adapt this to remove just the single object / redis index
-    # if not flush_redis():
-    #     remove_file(temp_file_loc)
-    #     del df
-    #     return JSONResponse(
-    #         status_code=500, content={"message": "Internal server error"}
-    #     )
     logger.info(f"Flushing redis db for index {body.name}.")
-    clear_ns(body.name)
+    clear_ns(r, body.name)
 
     print(CUSTOM_CLASSES)
 
@@ -704,8 +434,8 @@ async def dynamic_refresh(body: RefreshBody):
     for line_num, (i, row) in enumerate(df.iterrows()):
         try:
             name = get_proper_class_name(body.name) + "Hash"
-            x = CUSTOM_CLASSES["hash"][body.name]["instance"](
-                **row.to_dict()
+            x = CUSTOM_CLASSES["hash"][name]["instance"](
+                **row.to_dict(),
             )  # Upload to Redis
             x.save()
         except Exception as e:
@@ -715,10 +445,10 @@ async def dynamic_refresh(body: RefreshBody):
 
         if ((line_num + 1) % 100) == 0:
             logger.info(
-                f"Total rows processed: {line_num+1}. ({round(100*(line_num + 1)/len(df), 1)})%"
+                f"Total rows processed: {line_num+1}. ({round(100*(line_num + 1)/len(df), 1)})%",
             )
     logger.info(
-        f"Final data load into Redis: {len(df)} total rows processed. {errors} missed rows."
+        f"Final data load into Redis: {len(df)} total rows processed. {errors} missed rows.",
     )
 
     # create indices by running Migrate for Redis OM
@@ -729,18 +459,21 @@ async def dynamic_refresh(body: RefreshBody):
         logger.error("Error creating indices.")
         logger.error(e)
         remove_file(temp_file_loc)
-        del df
+        if df:
+            del df
         return JSONResponse(
-            status_code=500, content={"message": "Internal server error"}
+            status_code=500,
+            content={"message": "Internal server error"},
         )
 
     logger.info("Refresh complete.")
     remove_file(temp_file_loc)
-    del df
+    if df:
+        del df
 
     return JSONResponse(
         status_code=200,
-        content={"message": f"Refresh complete. Data loaded into redis db."},
+        content={"message": "Refresh complete. Data loaded into redis db."},
     )
 
 

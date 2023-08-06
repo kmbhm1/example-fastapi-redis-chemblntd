@@ -1,12 +1,12 @@
 import datetime
-from pydantic import BaseModel
 
+from pydantic import BaseModel
 from redis_om import Field, HashModel
 
 
 class StrictDate(datetime.date):
     @classmethod
-    def __get_validators__(cls) -> "CallableGenerator":  # noqa: F821
+    def __get_validators__(cls) -> "CallableGenerator":  # type: ignore # noqa: F821
         yield cls.validate
 
     @classmethod
@@ -88,9 +88,9 @@ class Chembtlntd(BaseModel):
                     "liver_pct_control_b_pct": 0.0,
                     "activity_parasite_a_pct": 0.0,
                     "activity_parasite_b_pct": 0.0,
-                    "sid_smiles": "CC1=CC=C(C=C1)C(=O)NC2=CC=C(C=C2)C(=O)NC3=CC=C(C=C3)C(=O)NC4=CC=C(C=C4)C(=O)NC5=CC=C(C=C5)C(=O)NC6=CC=C(C=C6)C(=O)NC7=CC=C(C=C7)C(=O)NC8=CC=C(C=C8)C(=O)NC9=CC=C(C=C9",
+                    "sid_smiles": "CC1=CC=C(C=C1)C(=O)NC2=CC=C(C=C2)C(=O)NC3=CC=C(C=C3)C(=O)NC4=CC=C(C=C4)C(=O)NC5=CC=C(C=C5)C(=O)NC6=CC=C(C=C6)C(=O)NC7=CC=C(C=C7)C(=O)NC8=CC=C(C=C8)C(=O)NC9=CC=C(C=C9",  # noqa: E501
                     "pubchem_substance_synonym": "PubChem Substance Synonym",
-                }
-            ]
-        }
+                },
+            ],
+        },
     }

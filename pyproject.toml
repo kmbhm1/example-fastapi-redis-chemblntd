@@ -21,6 +21,32 @@ openpyxl = "^3.1.2"
 fastapi-pagination = "^0.12.6"
 
 
+[tool.poetry.group.dev.dependencies]
+flake8 = "^6.1.0"
+flake8-pyproject = "^1.2.3"
+black = "^23.7.0"
+isort = "^5.12.0"
+pydocstyle = "^6.3.0"
+pre-commit = "^3.3.3"
+commitizen = "^3.6.0"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.flake8]
+max-line-length = 120
+ignore = [
+    "F403",  # 'from module import *' used; unable to detect undefined names
+    "F405",  # 'module' may be undefined, or defined from star imports: module
+]
+exclude = [
+    # No need to traverse our git directory
+    ".git",
+
+    # There's no value in checking cache directories
+    "__pycache__"
+]
+
+[tool.black]
+line-length = 120
