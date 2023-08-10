@@ -15,18 +15,6 @@ from redis_om import HashModel
 # get root logger
 logger = logging.getLogger(__name__)
 
-
-# @dataclass
-# class Attribute:
-#     """
-#     A class to represent an attribute of a new class.
-#     """
-
-#     name: str
-#     annotation: Union[int, float, str, bool]
-
-
-# a python dict for type annotations
 type_annotations = {
     "int": int,
     "float": float,

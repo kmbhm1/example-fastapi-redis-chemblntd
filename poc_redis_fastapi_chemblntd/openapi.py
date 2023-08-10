@@ -1,9 +1,6 @@
-from typing import List, Literal, Optional
+from typing import List, Optional, TypeVar, Generic
 
-from fastapi import Body
 from pydantic import BaseModel
-
-from poc_redis_fastapi_chemblntd.chemblntd import Chembtlntd
 
 # Api Documentation
 description = """
@@ -19,12 +16,8 @@ It is based on the [Redis Object Mapper](https://redis.com/blog/introducing-redi
 
 The API is read-only and provides the following endpoints:
 
-- `/chemblntd/hash`: returns a list of all valid hashes ids in the database
-- `/chemblntd/hash/{hash}`: returns the ChEMBL-NTD entry for the given hash
-- `/chemblntd/search/cid/{cid}`: returns a list of ChEMBL-NTD entries for the given CID
-- `/chemblntd/search/sid/{sid}`: returns a list of ChEMBL-NTD entries for the given SID
-- `/chemblntd/search/smiles/{smiles}`: returns a list of ChEMBL-NTD entries with the given SMILES string
-- `/chemblntd/refresh`: initiates a refresh of the database from the ChEMBL-NTD FTP site
+- `/refresh`: initiates a refresh of the database from the ChEMBL-NTD FTP site
+- `/searchs/{search_term}`: returns a list of ChEMBL-NTD entries with the given SMILES string
 """
 
 fast_api_metadata = {
@@ -38,22 +31,6 @@ fast_api_metadata = {
 }
 
 
-class RefreshHashModelInfo(BaseModel):
-    type: Literal["int", "float", "str", "bool"]
-    index: bool = False
-    full_text_search: bool = False
-
-
-class RefreshBody(BaseModel):
-    name: str
-    url: str
-    custom_schema: Optional[dict[str, RefreshHashModelInfo]]  # key = column name
-
-
-class GetColumnsBody(BaseModel):
-    url: str
-
-
 # Reponses
 responses = {
     404: {"message": "Item not found"},
@@ -61,87 +38,57 @@ responses = {
 }
 
 
-class SmilesBody(BaseModel):
-    smiles: str = Body(
-        title="The SMILES string",
-        description="""
-            The [SMILES](https://en.wikipedia.org/wiki/\
-            Simplified_molecular-input_line-entry_system)
-            string to search for""",
-    )
-
-    model_config = {
-        "json_schema_extra": {
-            "examples": [
-                {
-                    "smiles": "CCC1C(=O)NC(=O)NC1=O",
-                },
-            ],
-        },
-    }
-
-
 class Message(BaseModel):
     message: str
-
-
-class Hashes(BaseModel):
-    hashes: List[str]
+    totals: Optional[dict[str, int]] | None
 
     model_config = {
         "json_schema_extra": {
             "examples": [
                 {
-                    "hashes": [
-                        "01H5T42K2AEA7682MR9XD7Y2S4",
-                        "01H5T42K2F35GKYAP3TBDJXBBF",
-                        "01H5T42K2H54ST253B5J3H26PB",
-                        "01H5T42K2JZB0HAKFTXZXJE9MC",
-                        "01H5T42K2MFJT1P3Q9V90YZ3DW",
-                    ],
-                },
-            ],
-        },
-    }
-
-
-class Items(BaseModel):
-    id: str
-    value: List[Chembtlntd]
-
-
-class Item(BaseModel):
-    id: str
-    value: Chembtlntd
-
-    model_config = {
-        "json_schema_extra": {
-            "examples": [
-                {
-                    "id": "01H5T42K2AEA7682MR9XD7Y2S4",
-                    "value": {
-                        "pk": "01H5T42K2AEA7682MR9XD7Y2S4",
-                        "numrow": "1",
-                        "sid": "121363756",
-                        "cid": "54735847.0",
-                        "bioassay_source": "ICCB-Longwood/NSRB Screening Facility, Harvard Medical School",
-                        "rankscore": 100,
-                        "outcome": "Inactive",
-                        "depositdate": "2012/06/28",
-                        "luminescence_parasite_a": 214,
-                        "luminescence_parasite_b": 230,
-                        "luminescence_liver_a": 4178640.0,
-                        "luminescence_liver_b": 3648600.0,
-                        "parasite_pct_control_a_pct": 1.56,
-                        "parasite_pct_control_b_pct": 1.85,
-                        "liver_pct_control_a_pct": 57.36,
-                        "liver_pct_control_b_pct": 40.18,
-                        "activity_parasite_a_pct": 0.06,
-                        "activity_parasite_b_pct": 0.16,
-                        "sid_smiles": "CN(C)c1ccc2[n+](C)c(C=Cc3cc(C)n(c3C)-c3ccccc3)ccc2c1.CN(C)c1ccc2[n+](C)c(C=Cc3cc(C)n(c3C)-c3ccccc3)ccc2c1.CN(C)c1ccc2[n+](C)c(C=Cc3cc(C)n(c3C)-c3ccccc3)ccc2c1.Oc1c(Cc2c(O)c(cc3ccccc23)C([O-])=O)c2ccccc2cc1C([O-])=O",  # noqa: E501
-                        "pubchem_substance_synonym": "HMS2098O21",
+                    "message": "Refresh complete.",
+                    "totals": {
+                        "data": 1234,
+                        "lookup": 1234,
                     },
                 },
             ],
         },
     }
+
+
+class ReponseData(BaseModel):
+    name: str | None
+    description: str | None
+    smiles: str | None
+    ismiles: str | None
+    chebi: Optional[int] | None
+    reordering: Optional[List[int]] | None
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "name": "terbinafine",
+                    "description": "A tertiary amine that is N-methyl-1-naphthalenemethylamine in which the amino hydrogen is replaced by a 3-(tertbutylethynyl)allyl group. An antifungal agent administered orally (generally as the hydrochloride salt) for the treatment of skin and nail infections.",  # noqa: E501
+                    "smiles": "CN(CC=CC#CC(C)(C)C)Cc1cccc2ccccc12",
+                    "ismiles": "CN(C/C=C/C#CC(C)(C)C)Cc1cccc2ccccc12",
+                    "chebi": 9448,
+                    "reordering": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21],
+                },
+            ],
+        },
+    }
+
+
+T = TypeVar("T")
+
+
+class Items(BaseModel, Generic[T]):
+    id: str
+    value: List[T]
+
+
+class Item(BaseModel, Generic[T]):
+    id: str
+    value: T
