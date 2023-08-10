@@ -16,7 +16,7 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_OM_URL=redis://@redis:6379
-    image: swamidass/fastapi-poc:latest
+    image: swamidass/fastapi-redis:latest
     ports:
       - "8000:8000"
     volumes:

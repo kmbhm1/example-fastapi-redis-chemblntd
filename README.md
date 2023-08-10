@@ -75,8 +75,9 @@ uvicorn poc_redis_fastapi_chemblntd.main:app --reload   # Run the FastAPI server
 [Docker](https://docs.docker.com/get-docker/) is a set of platform as a service (PaaS) products that use OS-level virtualization to deliver software in packages called containers. Containers are isolated from one another and bundle their own software, libraries and configuration files; they can communicate with each other through well-defined channels. [Docker Compose](https://docs.docker.com/compose/install/) is a tool for defining and running multi-container Docker applications. With Compose, you use a YAML file to configure your application's services. Then, with a single command, you create and start all the services from your configuration.
 
 ```shell
-cd <project>                            # Change to the project directory
-docker-compose up                       # Run the docker container locally
+cd <project>                                      # Change to the project directory
+docker build -t swamidass/fastapi-redis:latest .   # Build the docker container locally
+docker-compose up                                 # Run the docker container locally
 ```
 
 ## Development
@@ -92,7 +93,8 @@ docker-compose up                       # Run the docker container locally
 ### Run the Docker Container Locally
 
 1. Perform the installation [steps](#installation).
-2. [Run](#docker--docker-compose) the docker container locally.
+2. [Build]((#docker--docker-compose)) the docker container locally.
+3. [Run](#docker--docker-compose) the docker container locally.
 
 ### Retrieve the Open API Documentation
 
