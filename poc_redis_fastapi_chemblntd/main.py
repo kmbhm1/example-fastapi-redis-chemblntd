@@ -1,6 +1,9 @@
+import datetime
 import logging
 import os
 import tempfile
+import gzip
+from lxml import etree
 
 import redis
 from fastapi import FastAPI
@@ -69,6 +72,53 @@ async def refresh():
     msg = {"message": "Refresh complete.", "totals": total}
     logger.info(msg["message"])
     return JSONResponse(status_code=200, content=msg)
+
+
+@app.get("/sitemap")
+async def sitemap():
+    try:
+        results = rnl.get_all()
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d")
+
+        # make dir if not exists
+        d = os.path.join(os.path.join(os.path.expanduser("~")), "Desktop", "sitemaps")
+        if not os.path.exists(d):
+            os.makedirs(d)
+
+        paths = []
+        index_sm = '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        for m in ["epoxidation", "quinone", "reactivity", "phase1", "ndealk", "ugt", "_"]:
+            xml = '<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            for r in results:
+                xml += f"<url><loc>https://xenosite.org/{m}/{r}</loc><lastmod>{now_str}</lastmod></url>"
+            xml += "</urlset>"
+            root = etree.fromstring(bytes(xml, "utf-8"))
+            tree = bytes(
+                '<?xml version="1.0" encoding="UTF-8"?>\n' + etree.tostring(root, pretty_print=True).decode(),
+                "utf-8",
+            )
+
+            path = os.path.join(d, f"sitemap_{m}.xml.gz")
+            with gzip.open(path, "wb") as f:
+                f.write(tree)
+            paths.append(path)
+            index_sm += f"<sitemap><loc>https://xenosite.org/sitemap_{m}.xml.gz</loc></sitemap>"
+
+        index_sm += "</sitemapindex>"
+        root = etree.fromstring(bytes(index_sm, "utf-8"))
+        tree = '<?xml version="1.0" encoding="UTF-8"?>\n' + etree.tostring(root, pretty_print=True).decode()
+        path = os.path.join(d, "sitemap_index.xml")
+        with open(path, "w") as f:
+            f.write(tree)
+        paths.append(path)
+
+        return JSONResponse(status_code=200, content={"message": paths})
+    except Exception as e:
+        logger.error(e)
+        return JSONResponse(
+            status_code=500,
+            content={"message": "Internal server error"},
+        )
 
 
 @app.get("/search/{search_term}", response_model=Item[ReponseData], responses=responses)

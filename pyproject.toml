@@ -23,6 +23,7 @@ msgpack = "^1.0.5"
 rdkit = "^2023.3.2"
 requests = "^2.31.0"
 python-redis-lock = "^4.0.0"
+lxml = "^4.9.3"
 
 
 [tool.poetry.group.dev.dependencies]

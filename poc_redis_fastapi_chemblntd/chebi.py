@@ -9,6 +9,7 @@ import redis
 from redis_lock import Lock
 from rdkit import Chem
 from rdkit import RDLogger
+import urllib.parse
 
 
 # disable rdkit logging
@@ -82,6 +83,15 @@ class RedisNameLookup:
             pass
 
         raise KeyError(f"Cannot resolve: {q}")
+
+    def get_all(self):
+        """Get all names in the Redis database."""
+        logger.info("Getting all names in chebi database.")
+        names = self.redis.hkeys("name-lookup")
+        results = [n.decode("utf-8") for n in names]
+        results = [urllib.parse.quote(n) for n in results]
+
+        return results
 
     def download_data(self) -> dict:
         """Download the ChEBI data from the URL.
